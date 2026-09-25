@@ -1,0 +1,30 @@
+修复 termux.properties 里硬编码的旧前缀。
+
+该文件是仓库里的字面文件，构建时被原样安装，configure 不会替换它：
+  Makefile.am:  for f in termux.properties; do install -c -m 644 ... done
+第 24 行注释里写着 /data/data/com.termux/files/home，会原封不动进 bootstrap
+（share/examples/termux/termux.properties），被「旧前缀必须为 0」的验收 grep 命中。
+
+同包里其余带前缀的文件（etc/profile、etc/bash.bashrc、scripts/*、motd 等）
+都由 Makefile 用 $(termux_prefix) 生成，会自动变成新前缀；只有这个静态文件不会。
+已用官方 bootstrap 逐文件核对：612 个含旧前缀的文件里，非 ELF/非脚本的
+161 个文本逐个回溯构建日志后，唯一「原样安装」的就是这一个。
+
+用 patch 而不是 build.sh 里的 sed：官方 patch 机制由构建系统在
+termux_step_patch_package 阶段应用（早于 pre_configure），是改源码的标准做法，
+不引入自定义 bash，也就不会因为 sed 的失败影响整轮构建。
+
+⚠️ 下面的包名必须与 fork 的 scripts/properties.sh 里 TERMUX_APP__PACKAGE_NAME
+   逐字符一致（当前 com.zhizhu.code）。将来换包名时同步改这一行。
+
+--- a/termux.properties
++++ b/termux.properties
+@@ -21,7 +21,7 @@
+ # allow-external-apps = true
+ 
+ ### Default working directory that will be used when launching the app.
+-# default-working-directory = /data/data/com.termux/files/home
++# default-working-directory = /data/data/com.zhizhu.code/files/home
+ 
+ ### Uncomment to disable toasts shown on terminal session change.
+ # disable-terminal-session-change-toast = true

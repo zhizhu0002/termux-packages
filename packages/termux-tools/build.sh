@@ -56,20 +56,12 @@ termux_step_pre_configure() {
 	export TERMUX_PREFIX="$TERMUX__PREFIX"
 	export TERMUX_ANDROID_HOME="$TERMUX__HOME"
 
-	# ---- 静态文件：termux.properties 是**原样安装**的，configure 不会碰它 ----
-	# 它是仓库里的字面文件（日志里 `for f in termux.properties; do install ... done`），
-	# 第 24 行注释里硬编码着旧前缀：
-	#   # default-working-directory = /data/data/com.termux/files/home
-	# 其余带前缀的同包文件（etc/profile、etc/bash.bashrc、scripts/*、motd 等）
-	# 都由 Makefile 用 $(termux_prefix) 生成，会随上面的 export 自动变成新前缀，
-	# 只有这个静态文件不会 —— 不改它，验收的 grep '/data/data/com.termux' 必然命中。
-	local props="$TERMUX_PKG_SRCDIR/termux.properties"
-	if [ -f "$props" ]; then
-		sed -i "s|/data/data/com\.termux|$TERMUX_APP__DATA_DIR|g" "$props"
-		if grep -q '/data/data/com\.termux' "$props"; then
-			termux_error_exit "termux.properties 仍含旧前缀，改写失败"
-		fi
-	fi
+	# 注：静态文件 termux.properties 里硬编码的旧前缀由同目录下的
+	# termux.properties.patch 修（改动见该 patch 头部的说明）。
+	# 这里**不要**再用 sed 就地改源码：实测那样会让本包在 4 个架构上
+	# 全部构建失败（packages.yml 在 2638430 全绿、474870c 全红），
+	# 而 patch 是官方机制，由 termux_step_patch_package 在 pre_configure
+	# 之前应用，稳定且可 review。
 
 	autoreconf -vfi
 }
