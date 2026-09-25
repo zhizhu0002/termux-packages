@@ -83,14 +83,40 @@ jobs:
           CI=true ./scripts/free-space.sh
           df -h /
 
-      - name: 构建 bootstrap（约 1~3 小时）
+      - name: 清理构建目录（替代 -f）
+        run: |
+          set -euo pipefail
+          # 官方帮助原文：
+          #   "If package name is changed, make sure to run
+          #    `./scripts/run-docker.sh ./clean.sh` or pass '-f'"
+          # 两条路只能走 clean.sh，因为 -f 会踩上游一个 bug：
+          #   build-bootstraps.sh:399  if [[ $FORCE_BUILD_PACKAGES == "1" ]]; then
+          #   build-bootstraps.sh:400      rm -f "$TERMUX_BUILT_PACKAGES_DIRECTORY_FOR_ARCH"/*
+          # 而 TERMUX_BUILT_PACKAGES_DIRECTORY_FOR_ARCH 在整个 scripts/ 里
+          # **从未被赋值**，空展开后就是 `rm -f /*`，报
+          #   rm: cannot remove '/bin': Permission denied
+          #   rm: cannot remove '/boot': Is a directory  ... 然后 exit 1
+          # （-f 不抑制 "Permission denied" 与 "Is a directory"，所以必然失败）
+          ./scripts/run-docker.sh ./clean.sh
+
+      - name: 构建 bootstrap（约 3~5 小时）
         env:
           EXTRA: ${{ inputs.additional_packages }}
         run: |
           set -euo pipefail
-          # -f 强制重建：官方帮助文本要求改包名后清缓存或加 -f，
-          # 否则可能复用按旧前缀编译的产物。CI 是全新容器，加 -f 无额外代价。
-          args=(-f --architectures aarch64)
+          # ⚠️ 必须显式设置 TERMUX_PACKAGE_MANAGER。
+          # build-bootstraps.sh 只 source properties.sh 与 termux_step_handle_buildarch.sh，
+          # 而该变量两者都没有定义（generate-bootstraps.sh 里才有
+          # `TERMUX_PACKAGE_MANAGER="apt"`）。脚本是 set -e 而非 -u，所以不会报错，
+          # 只会把它当空字符串替换进二阶段脚本：
+          #   export TERMUX_PACKAGE_MANAGER=""          ← 坏掉
+          # 后果：二阶段脚本第 167 行 `[ "${...}" = "apt" ]` 为假，
+          # apt 的包注册逻辑被整段跳过；第 290 行 `[ = "pacman" ]` 还会报语法错。
+          # 本工程要的就是 apt（与官方 apt-android-7 变体一致）。
+          export TERMUX_PACKAGE_MANAGER=apt
+          echo "TERMUX_PACKAGE_MANAGER = $TERMUX_PACKAGE_MANAGER"
+
+          args=(--architectures aarch64)
           if [ -n "${EXTRA//[[:space:]]/}" ]; then
             args+=(--add "$EXTRA")
           fi
@@ -120,13 +146,33 @@ jobs:
           echo "SYMLINKS.txt 行 : $sym   (应 > 0)"
           echo "期望前缀        : /data/data/$PKG/files/usr"
 
+          # ★ 二阶段脚本：@占位符必须被正确替换，否则 app 首次启动会坏
+          stage2=$(find . -name 'termux-bootstrap-second-stage.sh' | head -1)
+          echo "二阶段脚本      : ${stage2:-未找到}"
+          if [ -n "$stage2" ]; then
+            echo "--- 头部 ---"
+            head -6 "$stage2"
+            grep -q "^export TERMUX_PACKAGE_MANAGER=\"apt\"\$" "$stage2" \
+              || { echo "❌ TERMUX_PACKAGE_MANAGER 未被正确替换为 apt"; exit 1; }
+            grep -q "^export TERMUX_PREFIX=\"$PKG\|^export TERMUX_PREFIX=\"/data/data/$PKG" "$stage2" \
+              || { echo "⚠️ 二阶段脚本里的 TERMUX_PREFIX 看起来不对（见上方头部）"; exit 1; }
+            if grep -q '@[A-Z_]\{3,\}@' "$stage2"; then
+              echo "❌ 仍有未替换的 @占位符："
+              grep -o '@[A-Z_]\{3,\}@' "$stage2" | sort -u
+              exit 1
+            fi
+            echo "✅ 二阶段脚本占位符全部正确替换"
+          else
+            echo "❌ 未找到二阶段脚本"; exit 1
+          fi
+
           [ "$total" -gt 500 ] || { echo "❌ 文件数异常，构建可能失败"; exit 1; }
           [ "$sym" -gt 0 ]     || { echo "❌ 缺 SYMLINKS.txt 或为空"; exit 1; }
           [ "$new" -gt 300 ]   || { echo "❌ 新前缀命中过少，构建可能没用到新包名"; exit 1; }
           if [ "$old" -ne 0 ]; then
             echo "❌ 仍有旧前缀 /data/data/com.termux 残留，示例："
             grep -rl --binary-files=text '/data/data/com.termux' . 2>/dev/null | head -20
-            echo "   很可能是复用了旧前缀的编译产物，检查 -f 与依赖是否本地编译"
+            echo "   很可能是复用了旧前缀的编译产物，检查依赖是否本地编译"
             exit 1
           fi
           echo "✅ 验收通过：旧前缀已彻底清零"
