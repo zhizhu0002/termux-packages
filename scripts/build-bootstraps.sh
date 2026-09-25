@@ -429,7 +429,15 @@ main() {
 
 		# Core utilities.
 		PACKAGES+=("bash") # Used by `termux-bootstrap-second-stage.sh`
-		PACKAGES+=("bzip2")
+		# 注意：仓库里**没有** packages/bzip2 这个包目录，bzip2 是
+		# packages/libbz2 的子包（见 packages/libbz2/bzip2.subpackage.sh）。
+		# 若写 "bzip2"，build-package.sh:718-728 在 TERMUX_PACKAGES_DIRECTORIES
+		# 里找不到目录，会 termux_error_exit：
+		#   No package bzip2 found in any of the enabled repositories.
+		#   Are you trying to set up a custom repository?
+		# 改为 libbz2：构建它会同时产出 libbz2 与 bzip2 两个 deb，
+		# 而 extract_debs 会解包 output/ 下所有 deb，因此结果与预期一致。
+		PACKAGES+=("libbz2")
 		if ! ${BOOTSTRAP_ANDROID10_COMPATIBLE}; then
 			PACKAGES+=("command-not-found")
 		else
