@@ -116,6 +116,39 @@ jobs:
           # 所以不会报错，只会把空值替换进二阶段脚本：
           #   export TERMUX_PACKAGE_MANAGER=""     ← 坏掉
           # 后果：第167行 apt 分支被跳过、第290行 `[ = "pacman" ]` 语法错。
+          #
+          # ── ★ AppArmor 坑：这就是上次构建"编完了却拿不到 zip"的真因 ──────────
+          # run-docker.sh 在 exec 之前一定会加载 scripts/profile-restricted.apparmor：
+          #     deny  /home/builder/termux-packages/[^o]** wlk,
+          #     allow /home/builder/termux-packages/output/** rw,
+          # 意思是"容器进程只能写仓库里的 output/"。于是 build-bootstraps.sh 结尾那句
+          #     mv -f "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" "$TERMUX_PACKAGES_DIRECTORY/"
+          # 必然 EACCES：
+          #     mv: cannot create regular file '/home/builder/termux-packages/bootstrap-aarch64.zip': Permission denied
+          # 与 uid 无关：容器里的 builder 就是 1001（Dockerfile useradd -u 1001），
+          # run-docker.sh 的 __change_builder_uid_gid 因此不动作；而 AppArmor 的 deny
+          # 是 LSM 层拦截，root 也照样被拒（日志里那句“Loading restricted AppArmor profile...”）。
+          # 更坑的是该 mv 被 `create_bootstrap_archive "$TERMUX_ARCH" || return $?` 调用，
+          # errexit 被抑制 → 脚本继续打印 "[*] Finished successfully" → EXIT trap 又
+          # rm -rf 掉 BOOTSTRAP_TMPDIR（zip 就在里面）→ 工作区里什么都没有，
+          # 全日志只剩一行 mv 报错，直到最后 ls bootstrap-aarch64.zip 才炸。
+          #
+          # 修法：宿主侧（不受 AppArmor 约束）把 mv 目标改成 output/，
+          # 构建成功后再把 zip 搬回仓库根，后面的「验收」「上传 zip」两步照旧。
+          bb=scripts/build-bootstraps.sh
+          [ -f "$bb" ] || { echo "❌ 找不到 $bb"; exit 1; }
+          n=$(grep -cF '"$TERMUX_PACKAGES_DIRECTORY/"' "$bb" || true)
+          echo "build-bootstraps.sh 的 mv 目标出现次数 = $n（期望 1）"
+          if [ "$n" -ne 1 ]; then
+            echo "❌ 未找到唯一的 mv 目标行，上游脚本可能已改，请人工核对："
+            grep -nF 'TERMUX_PACKAGES_DIRECTORY' "$bb" || true
+            exit 1
+          fi
+          sed -i 's|"\$TERMUX_PACKAGES_DIRECTORY/"|"\$TERMUX_PACKAGES_DIRECTORY/output/"|' "$bb"
+          grep -qF '"$TERMUX_PACKAGES_DIRECTORY/output/"' "$bb" \
+            || { echo "❌ sed 补丁未生效"; exit 1; }
+          grep -nF 'bootstrap-${1}.zip" "$TERMUX_PACKAGES_DIRECTORY/output/"' "$bb" || true
+
           export TERMUX_DOCKER_EXEC_EXTRA_ARGS="--env TERMUX_PACKAGE_MANAGER=apt"
 
           args=(--architectures aarch64)
@@ -125,6 +158,20 @@ jobs:
           echo "调用: ./scripts/run-docker.sh ./scripts/build-bootstraps.sh ${args[*]}"
           echo "注入: TERMUX_DOCKER_EXEC_EXTRA_ARGS=$TERMUX_DOCKER_EXEC_EXTRA_ARGS"
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh "${args[@]}"
+
+          # 容器只能在 output/ 里落地 zip（见上面的 AppArmor 说明），宿主搬回仓库根。
+          if [ -f "output/bootstrap-aarch64.zip" ]; then
+            mv -f output/bootstrap-aarch64.zip ./bootstrap-aarch64.zip
+          fi
+          # mv 失败时上游只会打一行 "Permission denied" 却仍然报 Finished successfully，
+          # 所以这里必须自己断言产物存在，否则 2 小时构建白跑。
+          [ -f bootstrap-aarch64.zip ] || {
+            echo "❌ 构建结束但仓库根目录没有 bootstrap-aarch64.zip"
+            echo "   容器内 output/ 里有："
+            ls -l output/*.zip 2>/dev/null || echo "   （output/ 里也没有 zip）"
+            exit 1
+          }
+          ls -lh bootstrap-aarch64.zip
 
       - name: 验收（旧前缀必须为 0）
         env:
