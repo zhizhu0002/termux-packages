@@ -99,28 +99,31 @@ jobs:
           # （-f 不抑制 "Permission denied" 与 "Is a directory"，所以必然失败）
           ./scripts/run-docker.sh ./clean.sh
 
-      - name: 构建 bootstrap（约 3~5 小时）
+      - name: 构建 bootstrap
         env:
           EXTRA: ${{ inputs.additional_packages }}
         run: |
           set -euo pipefail
-          # ⚠️ 必须显式设置 TERMUX_PACKAGE_MANAGER。
-          # build-bootstraps.sh 只 source properties.sh 与 termux_step_handle_buildarch.sh，
-          # 而该变量两者都没有定义（generate-bootstraps.sh 里才有
-          # `TERMUX_PACKAGE_MANAGER="apt"`）。脚本是 set -e 而非 -u，所以不会报错，
-          # 只会把它当空字符串替换进二阶段脚本：
-          #   export TERMUX_PACKAGE_MANAGER=""          ← 坏掉
-          # 后果：二阶段脚本第 167 行 `[ "${...}" = "apt" ]` 为假，
-          # apt 的包注册逻辑被整段跳过；第 290 行 `[ = "pacman" ]` 还会报语法错。
-          # 本工程要的就是 apt（与官方 apt-android-7 变体一致）。
-          export TERMUX_PACKAGE_MANAGER=apt
-          echo "TERMUX_PACKAGE_MANAGER = $TERMUX_PACKAGE_MANAGER"
+          # ⚠️ TERMUX_PACKAGE_MANAGER 必须**传进容器**，光在宿主 export 是无效的。
+          # run-docker.sh:221 的实际调用是：
+          #   docker exec $CI_OPT --env "DOCKER_EXEC_PID_FILE_PATH=..." --interactive \
+          #     $DOCKER_TTY $TERMUX_DOCKER_EXEC_EXTRA_ARGS $CONTAINER_NAME "$@"
+          # docker exec 不继承宿主环境，只能靠 TERMUX_DOCKER_EXEC_EXTRA_ARGS 注入。
+          #
+          # 为什么需要它：build-bootstraps.sh 只 source properties.sh 与
+          # termux_step_handle_buildarch.sh，而该变量两者都没定义
+          # （只有 generate-bootstraps.sh:33 有 ="apt"）。脚本是 set -e 非 -u，
+          # 所以不会报错，只会把空值替换进二阶段脚本：
+          #   export TERMUX_PACKAGE_MANAGER=""     ← 坏掉
+          # 后果：第167行 apt 分支被跳过、第290行 `[ = "pacman" ]` 语法错。
+          export TERMUX_DOCKER_EXEC_EXTRA_ARGS="--env TERMUX_PACKAGE_MANAGER=apt"
 
           args=(--architectures aarch64)
           if [ -n "${EXTRA//[[:space:]]/}" ]; then
             args+=(--add "$EXTRA")
           fi
           echo "调用: ./scripts/run-docker.sh ./scripts/build-bootstraps.sh ${args[*]}"
+          echo "注入: TERMUX_DOCKER_EXEC_EXTRA_ARGS=$TERMUX_DOCKER_EXEC_EXTRA_ARGS"
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh "${args[@]}"
 
       - name: 验收（旧前缀必须为 0）

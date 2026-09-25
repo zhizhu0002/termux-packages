@@ -27,6 +27,20 @@ TERMUX_PKG_DEPENDS="libandroid-glob, libandroid-posix-semaphore, libcap-ng, libs
 TERMUX_PKG_ESSENTIAL=true
 TERMUX_PKG_BREAKS="util-linux-dev"
 TERMUX_PKG_REPLACES="util-linux-dev"
+# ac_cv_type_struct_nsfs_file_handle=no：
+# configure.ac 里是
+#   AC_CHECK_TYPES([struct nsfs_file_handle], [], [], [[#include <linux/nsfs.h>]])
+# 该检查只验证 <linux/nsfs.h>（NDK r30 起有），不验证 glibc 的
+# struct file_handle / name_to_handle_at / open_by_handle_at（bionic 要 API >= 26）。
+# 于是探测结果为 yes，nsenter.c 第 60 行
+#   #if defined(HAVE_STRUCT_NSFS_FILE_HANDLE) && defined(HAVE_PIDFD_OPEN)
+# 里的那段代码被编进来，而 UL_CHECK_SYSCALL([pidfd_open]) 只查 syscall 号
+# （aarch64 恒有），所以 HAVE_PIDFD_OPEN 也是 yes，必然编译失败：
+#   nsenter.c:189:27: error: variable has incomplete type 'struct file_handle'
+#   nsenter.c:225:6: error: call to undeclared function 'name_to_handle_at'
+# 强制置 no 与该文件既有的 ac_cv_* 覆盖风格一致，效果等同于把该特性编译掉，
+# 也正是官方已发布 bootstrap 的实际形态（其中 bin/nsenter 不含
+# name_to_handle_at / open_by_handle_at / nsfs 任何引用）。
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 ac_cv_func_setns=yes
 ac_cv_func_statx=no
@@ -34,6 +48,7 @@ ac_cv_func_unshare=yes
 ac_cv_func_uselocale=no
 ac_cv_type_struct_statx=no
 ac_cv_type_struct_fanotify_event_info_header=no
+ac_cv_type_struct_nsfs_file_handle=no
 --enable-setpriv
 --disable-agetty
 --disable-chmem
