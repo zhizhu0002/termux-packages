@@ -186,15 +186,45 @@ jobs:
           unzip -q "$GITHUB_WORKSPACE/bootstrap-aarch64.zip"
 
           total=$(find . -type f | wc -l)
-          old=$(grep -rl --binary-files=text '/data/data/com.termux' . 2>/dev/null | wc -l)
-          new=$(grep -rl --binary-files=text "/data/data/$PKG" . 2>/dev/null | wc -l)
+          # ⚠️ 末尾的 `|| true` 是必需的，别删：
+          # 本步骤是 `set -euo pipefail`，而 `old=$(grep -rl ... | wc -l)` 在
+          # **零命中**时 grep 退出码为 1，pipefail 使整条管道返回 1，赋值语句
+          # 于是失败，`set -e` 直接杀掉脚本 —— 也就是「旧前缀已清零」这个
+          # **成功**结果反而会让验收报错。已用最小用例复现（只打印 total 就 exit 1）。
+          # `new` 同理，一并加上以防隐患。
+          old=$(grep -rl --binary-files=text '/data/data/com.termux' . 2>/dev/null | wc -l || true)
+          new=$(grep -rl --binary-files=text "/data/data/$PKG" . 2>/dev/null | wc -l || true)
           sym=$(wc -l < SYMLINKS.txt 2>/dev/null || echo 0)
 
-          echo "文件总数        : $total"
+          # 关键二进制必须在：这是「内容被改坏/被裁剪误删」的最直接信号。
+          # （arch_bin 里的软链不存进归档而是记在 SYMLINKS.txt，所以只查真实文件）
+          for f in bin/bash bin/apt bin/dpkg bin/curl bin/sed bin/tar bin/grep bin/find; do
+            [ -f "$f" ] || {
+              echo "❌ 缺关键二进制 $f"
+              echo "bin/ 前 40 项："; ls bin/ 2>/dev/null | head -40
+              exit 1
+            }
+          done
+
+          # 已装包数只是提示，不作失败条件：正文会说明它与体积的关系。
+          pkgn=$(grep -c '^Package: ' var/lib/dpkg/status 2>/dev/null || echo 0)
+          zipsize=$(stat -c%s "$GITHUB_WORKSPACE/bootstrap-aarch64.zip" 2>/dev/null || echo 0)
+
+          echo "文件总数        : $total   (官方 release 3473)"
+          echo "已装包数        : $pkgn    (官方 release 82)"
+          echo "zip 体积        : $((zipsize/1024/1024)) MB  (官方 release 约 32 MB)"
           echo "旧前缀文件数    : $old   (必须为 0)"
           echo "新前缀文件数    : $new   (应 > 300)"
           echo "SYMLINKS.txt 行 : $sym   (应 > 0)"
           echo "期望前缀        : /data/data/$PKG/files/usr"
+          if [ "$pkgn" -gt 130 ] || [ "$total" -gt 6000 ]; then
+            echo "⚠️  包数/文件数明显偏大 —— 这是 build-bootstraps.sh 的已知特性："
+            echo "    它的 extract_debs() 会把 output/ 里**每个** deb 都解进归档，"
+            echo "    而 fork 场景下所有依赖只能源码编译，于是 doxygen/python/perl/tcl/"
+            echo "    tk/X11/fontconfig 等纯构建期依赖也被打了进去（实测 159 包/122 MB）。"
+            echo "    归档**可用**，只是偏大；按运行时依赖闭包裁剪请见"
+            echo "    tools/termux-bootstrap-fork/prune-bootstrap.js（已实测：→ 83 包/31.6 MB）。"
+          fi
 
           # ★ 二阶段脚本：@占位符必须被正确替换，否则 app 首次启动会坏
           stage2=$(find . -name 'termux-bootstrap-second-stage.sh' | head -1)
@@ -221,7 +251,12 @@ jobs:
           [ "$new" -gt 300 ]   || { echo "❌ 新前缀命中过少，构建可能没用到新包名"; exit 1; }
           if [ "$old" -ne 0 ]; then
             echo "❌ 仍有旧前缀 /data/data/com.termux 残留：$old 个文件"
-            echo "   很可能是复用了旧前缀的编译产物，检查依赖是否本地编译"
+            echo "   已知来源（运行 #6 实测只剩这 2 个，且都是**注释文本**，不影响功能）："
+            echo "     bin/termux-exec-ld-preload-lib"
+            echo "     include/termux-exec/.../ExecIntercept.h"
+            echo "   二者都来自 termux-exec 包里原样安装的静态文件，可用"
+            echo "     sed -i 's|/data/data/com\\.termux|/data/data/<新包名>|g' <文件>"
+            echo "   修掉（tools/termux-bootstrap-fork/README.md 第九节有完整后处理流程）。"
             # ── 详细取证：一次运行就要能定位，不要再来一轮 70 分钟 ──
             # 按「ELF / #! 脚本 / 普通文本」分类，并落盘成 artifact，
             # 这样即使日志被截断也能拿到完整清单。
