@@ -220,9 +220,42 @@ jobs:
           [ "$sym" -gt 0 ]     || { echo "❌ 缺 SYMLINKS.txt 或为空"; exit 1; }
           [ "$new" -gt 300 ]   || { echo "❌ 新前缀命中过少，构建可能没用到新包名"; exit 1; }
           if [ "$old" -ne 0 ]; then
-            echo "❌ 仍有旧前缀 /data/data/com.termux 残留，示例："
-            grep -rl --binary-files=text '/data/data/com.termux' . 2>/dev/null | head -20
+            echo "❌ 仍有旧前缀 /data/data/com.termux 残留：$old 个文件"
             echo "   很可能是复用了旧前缀的编译产物，检查依赖是否本地编译"
+            # ── 详细取证：一次运行就要能定位，不要再来一轮 70 分钟 ──
+            # 按「ELF / #! 脚本 / 普通文本」分类，并落盘成 artifact，
+            # 这样即使日志被截断也能拿到完整清单。
+            audit="$GITHUB_WORKSPACE/bootstrap-audit.txt"
+            grep -rl --binary-files=text '/data/data/com.termux' . 2>/dev/null | sort > /tmp/old-prefix-files.txt
+            {
+              echo "旧前缀文件清单（共 $old 个）"
+              echo "分类规则：ELF=前 4 字节 \\x7fELF；脚本=以 #! 开头；文本=其余"
+              echo
+            } > "$audit"
+            : > /tmp/elf.txt; : > /tmp/script.txt; : > /tmp/text.txt
+            while IFS= read -r f; do
+              if [ "$(od -An -c -N4 "$f" 2>/dev/null | tr -d ' \n')" = "177ELF" ]; then
+                echo "$f" >> /tmp/elf.txt
+              elif [ "$(head -c2 "$f" 2>/dev/null)" = '#!' ]; then
+                echo "$f" >> /tmp/script.txt
+              else
+                echo "$f" >> /tmp/text.txt
+              fi
+            done < /tmp/old-prefix-files.txt
+            ne=$(wc -l < /tmp/elf.txt); ns=$(wc -l < /tmp/script.txt); nt=$(wc -l < /tmp/text.txt)
+            echo "  ELF 二进制 : $ne   ← 正常应为 0（源码构建后所有 ELF 都是新前缀）"
+            echo "  #! 脚本    : $ns   ← 正常应为 0"
+            echo "  普通文本   : $nt   ← 非 0 说明有静态文件没被替换（如 termux.properties）"
+            {
+              echo "== ELF ($ne) =="; cat /tmp/elf.txt
+              echo; echo "== #! 脚本 ($ns) =="; cat /tmp/script.txt
+              echo; echo "== 普通文本 ($nt) =="; cat /tmp/text.txt
+            } >> "$audit"
+            echo "--- 普通文本（最可能是漏改的静态文件，全部列出）---"
+            cat /tmp/text.txt
+            echo "--- ELF / 脚本 各列出前 30 个 ---"
+            head -30 /tmp/elf.txt; head -30 /tmp/script.txt
+            echo "完整清单见 artifact: bootstrap-audit.txt"
             exit 1
           fi
           echo "✅ 验收通过：旧前缀已彻底清零"
@@ -232,14 +265,25 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bootstrap-aarch64-${{ inputs.package_name }}
-          path: bootstrap-aarch64.zip
+          # 失败时 bootstrap-audit.txt 会带上全量旧前缀文件清单，
+          # 一次运行就能定位，不必再然一轮 70 分钟。
+          path: |
+            bootstrap-aarch64.zip
+            bootstrap-audit.txt
           if-no-files-found: warn
           retention-days: 30
+          overwrite: true
 
       - name: 失败时留下诊断信息
         if: failure()
         run: |
           echo "=== properties.sh 最终状态 ==="
           grep -nE '^TERMUX_APP__PACKAGE_NAME=|^TERMUX_APP__NAMESPACE=' scripts/properties.sh || true
+          echo "=== build-bootstraps.sh 的 mv 补丁是否生效 ==="
+          grep -nF 'TERMUX_PACKAGES_DIRECTORY/output/' scripts/build-bootstraps.sh || \
+            echo "（未找到 /output/ 补丁，说明 sed 未生效）"
+          echo "=== output/ 里的 zip / deb ==="
+          ls -l output/*.zip 2>/dev/null || echo "（output/ 无 zip）"
+          ls output/*.deb 2>/dev/null | wc -l || true
           echo "=== 磁盘 ==="
           df -h / || true
