@@ -206,6 +206,44 @@ jobs:
             }
           done
 
+          # ── 我们修过的两个上游 bug，必须在 CI 里自己断言 ──────────────────
+          # 否则要下载 122 MB 到本地才知道改没改对，白等一轮。
+          #
+          # ① sed 的 SELinux 污染
+          #    fork 的单容器构建让 coreutils 先把 libandroid-selinux 装进
+          #    $TERMUX_PREFIX，sed 的 gnulib 自动探测（with_selinux=maybe）到了它，
+          #    于是把 SELinux 支持编了进去 → 每次 `sed -i` 都会打
+          #      "failed to set default file creation context ...: Permission denied"
+          #    dpkg 的 maintainer script 大量用 sed -i，所以 `pkg install` 就能看到。
+          #    修法：packages/sed/build.sh 加 --without-selinux。
+          #
+          #    注：coreutils / tar 也链接 libandroid-selinux.so，但那是上游**有意**
+          #    声明并链接的，实测它们并不会打那句警告 —— 只查 sed 就好。
+          if grep -qa 'failed to set default file creation context' bin/sed; then
+            echo "❌ bin/sed 仍带 SELinux 支持 —— pkg install 时还会出现那条警告"
+            echo "   ① packages/sed/build.sh 里有没有 --without-selinux？"
+            echo "   ② 本次 CI 用的 commit 含这个补丁吗？（git log --oneline -1 对照）"
+            exit 1
+          fi
+          if grep -qa 'libandroid-selinux\.so' bin/sed; then
+            echo "❌ bin/sed 仍链接 libandroid-selinux.so"; exit 1
+          fi
+          echo "✅ bin/sed 已不含 SELinux 支持（pkg install 不会再打那条警告）"
+
+          # ② bin/lsns 的 libmount
+          #    bin/lsns 属于 util-linux 主包，而 libmount 是同一次 build 的**子包**，
+          #    上游没法声明这个依赖（自依赖环）→ 官方 release 也漏了，
+          #    官方那份 bin/lsns 同样是 CANNOT LINK EXECUTABLE。
+          #    这里只断言"库在"；通用的 ELF 依赖检查在本地裁剪工具里。
+          for lib in libmount.so libblkid.so libsmartcols.so; do
+            [ -f "lib/$lib" ] || {
+              echo "❌ 缺 lib/$lib —— bin/lsns 会 CANNOT LINK EXECUTABLE"
+              echo "    已知原因见 tools/termux-bootstrap-fork/README.md 第 11.1 节"
+              exit 1
+            }
+          done
+          echo "✅ bin/lsns 依赖的库都在（libmount / libblkid / libsmartcols）"
+
           # 已装包数只是提示，不作失败条件：正文会说明它与体积的关系。
           pkgn=$(grep -c '^Package: ' var/lib/dpkg/status 2>/dev/null || echo 0)
           zipsize=$(stat -c%s "$GITHUB_WORKSPACE/bootstrap-aarch64.zip" 2>/dev/null || echo 0)
@@ -223,7 +261,7 @@ jobs:
             echo "    而 fork 场景下所有依赖只能源码编译，于是 doxygen/python/perl/tcl/"
             echo "    tk/X11/fontconfig 等纯构建期依赖也被打了进去（实测 159 包/122 MB）。"
             echo "    归档**可用**，只是偏大；按运行时依赖闭包裁剪请见"
-            echo "    tools/termux-bootstrap-fork/prune-bootstrap.js（已实测：→ 83 包/31.6 MB）。"
+            echo "    tools/termux-bootstrap-fork/prune-bootstrap.js（已实测：→ 85 包/31.9 MB）。"
           fi
 
           # ★ 二阶段脚本：@占位符必须被正确替换，否则 app 首次启动会坏
